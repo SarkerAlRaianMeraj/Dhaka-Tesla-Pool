@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FormError, PrimaryButton, TextInput } from "@/components/form-controls";
 import { Layout } from "@/components/Layout/layout";
 import { Eyebrow, Panel } from "@/components/ui/panel";
@@ -11,7 +11,14 @@ import { apiClient, getErrorMessage, isUnauthorized } from "@/lib/apiClient";
 import { useAuth } from "@/lib/auth-context";
 import { formatPoysha, formatSeats, formatTimestamp } from "@/lib/format";
 import { firstIssue, teslaRegistrationSchema } from "@/lib/schemas";
-import type { MatchableRide, MyTesla, Tesla, TeslaAvailability } from "@/lib/types";
+import type {
+  MatchableRide,
+  MyPool,
+  MyTesla,
+  PoolManifest,
+  Tesla,
+  TeslaAvailability,
+} from "@/lib/types";
 
 const CAPACITY_OPTIONS = [1, 2, 3];
 
@@ -54,6 +61,16 @@ const TeslaPage = () => {
   const [requestsError, setRequestsError] = useState<string | undefined>(
     undefined,
   );
+
+  const [pool, setPool] = useState<PoolManifest | null>(null);
+  const [isLoadingPool, setIsLoadingPool] = useState(false);
+  const [poolError, setPoolError] = useState<string | undefined>(undefined);
+
+  // Which row is accepting right now, and why a row's accept failed. Kept per
+  // ride id so a refusal lands on the request it concerns instead of a shared
+  // error line a driver has to match back up.
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
+  const [acceptErrors, setAcceptErrors] = useState<Record<string, string>>({});
 
   // The session decides whether this page exists for the caller at all, so the
   // role check happens here rather than letting four requests come back 403.
@@ -112,37 +129,113 @@ const TeslaPage = () => {
    * The feed is only fetched once a Tesla exists, because the API refuses it
    * before then: there is nothing for open requests to match to without a vehicle,
    * and an empty feed would read as "nobody wants a ride" instead.
+   *
+   * `cancelledRef` takes the place of the effect-local `cancelled` flag, because
+   * accepting a request also refreshes the feed and that call happens outside the
+   * effect. One ref is shared by both, so accepting never writes state into an
+   * unmounted page.
    */
+  const cancelledRef = useRef(false);
+
+  const fetchRequests = useCallback(async (): Promise<void> => {
+    setIsLoadingRequests(true);
+    try {
+      const response = await apiClient.get<MatchableRide[]>("/tesla/requests");
+      if (cancelledRef.current) return;
+      setRequests(response.data);
+      setRequestsError(undefined);
+    } catch (caught) {
+      if (cancelledRef.current) return;
+      if (isUnauthorized(caught)) {
+        router.replace("/login");
+        return;
+      }
+      setRequestsError(
+        getErrorMessage(caught, "Could not load matchable requests."),
+      );
+    } finally {
+      if (!cancelledRef.current) setIsLoadingRequests(false);
+    }
+  }, [router]);
+
   useEffect(() => {
     if (!tesla) return;
-
-    let cancelled = false;
-
-    const fetchRequests = async (): Promise<void> => {
-      setIsLoadingRequests(true);
-      try {
-        const response = await apiClient.get<MatchableRide[]>(
-          "/tesla/requests",
-        );
-        if (!cancelled) {
-          setRequests(response.data);
-          setRequestsError(undefined);
-        }
-      } catch (caught) {
-        if (cancelled) return;
-        setRequestsError(
-          getErrorMessage(caught, "Could not load matchable requests."),
-        );
-      } finally {
-        if (!cancelled) setIsLoadingRequests(false);
-      }
-    };
-
+    cancelledRef.current = false;
     void fetchRequests();
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
     };
-  }, [tesla]);
+  }, [tesla, fetchRequests]);
+
+  const fetchPool = useCallback(async (): Promise<void> => {
+    setIsLoadingPool(true);
+    try {
+      const response = await apiClient.get<MyPool>("/tesla/pool");
+      if (cancelledRef.current) return;
+      /*
+       * `?? null` is the same belt-and-braces as the Tesla read: the API answers
+       * 200 with `{ pool: null }`, normalising it here keeps a malformed body in
+       * the same branch as a genuine empty pool rather than leaving `pool`
+       * undefined and rendering a manifest full of "undefined".
+       */
+      setPool(response.data?.pool ?? null);
+      setPoolError(undefined);
+    } catch (caught) {
+      if (cancelledRef.current) return;
+      if (isUnauthorized(caught)) {
+        router.replace("/login");
+        return;
+      }
+      setPoolError(
+        getErrorMessage(caught, "Could not load your passenger manifest."),
+      );
+    } finally {
+      if (!cancelledRef.current) setIsLoadingPool(false);
+    }
+  }, [router]);
+
+  useEffect(() => {
+    if (!tesla) return;
+    cancelledRef.current = false;
+    void fetchPool();
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, [tesla, fetchPool]);
+
+  const handleAccept = async (rideId: string): Promise<void> => {
+    setAcceptingId(rideId);
+    setAcceptErrors((previous) => ({ ...previous, [rideId]: "" }));
+    try {
+      /*
+       * The manifest comes straight back (201), so there is no second read that
+       * could disagree with what the server just stored. The feed is then
+       * refreshed because the accepted ride left it.
+       */
+      const response = await apiClient.post<PoolManifest>(
+        `/tesla/requests/${rideId}/accept`,
+      );
+      if (cancelledRef.current) return;
+      setPool(response.data);
+      await fetchRequests();
+    } catch (caught) {
+      if (cancelledRef.current) return;
+      if (isUnauthorized(caught)) {
+        router.replace("/login");
+        return;
+      }
+      // A refusal here is a normal racing outcome (PRD §5.4-E, E1): the last seat
+      // may have gone between the feed load and the click. Refreshing lets the
+      // now-taken ride drop out instead of sitting there inviting another try.
+      await fetchRequests();
+      setAcceptErrors((previous) => ({
+        ...previous,
+        [rideId]: getErrorMessage(caught, "Could not accept that request."),
+      }));
+    } finally {
+      setAcceptingId(null);
+    }
+  };
 
   const handleRegister = async (
     event: React.FormEvent<HTMLFormElement>,
@@ -350,6 +443,66 @@ const TeslaPage = () => {
             </div>
           </Panel>
 
+          <Panel as="section" className="animate-rise [animation-delay:40ms]">
+            <div className="flex flex-col gap-4 px-7 py-6">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="flex flex-col gap-1">
+                  <h2 className="font-display text-lg font-semibold text-ink">
+                    Passengers aboard
+                  </h2>
+                  <p className="text-sm text-ink/60">
+                    {pool
+                      ? `${formatSeats(pool.occupiedSeats)} taken · ${formatSeats(pool.openSeats)} free · pool total ${formatPoysha(pool.poolTotalPoysha)} Taka`
+                      : "No passengers yet."}
+                  </p>
+                </div>
+                {pool ? (
+                  <span className="inline-flex h-7 items-center rounded-full bg-mint/22 px-3 font-display text-[11px] font-semibold tracking-wide text-forest uppercase ring-1 ring-mint/55">
+                    {pool.status}
+                  </span>
+                ) : null}
+              </div>
+
+              <FormError>{poolError}</FormError>
+
+              {isLoadingPool ? (
+                <Skeleton className="h-16 w-full" label="Loading your pool" />
+              ) : pool === null ? (
+                <p className="text-sm text-ink/60">
+                  Accept a request and everyone you are carrying appears here with
+                  their seat and the pool total.
+                </p>
+              ) : pool.members.length === 0 ? (
+                <p className="text-sm text-ink/60">
+                  The pool is open but no one has taken the free{" "}
+                  {formatSeats(pool.openSeats)} yet.
+                </p>
+              ) : (
+                <ul className="flex flex-col gap-2.5">
+                  {pool.members.map((member) => (
+                    <li
+                      key={member.membershipId}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded-2xl bg-paper/70 px-4 py-3"
+                    >
+                      <span className="flex min-w-0 flex-col gap-0.5">
+                        <span className="font-display text-sm font-medium text-ink">
+                          {member.passengerName}
+                        </span>
+                        <span className="text-xs text-ink/55">
+                          {member.pickupZoneName} to {member.destinationZoneName}
+                        </span>
+                      </span>
+                      <span className="flex items-center gap-3 text-xs text-ink/55">
+                        <span>{formatSeats(member.seats)}</span>
+                        <span>joined {formatTimestamp(member.joinedAt)}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </Panel>
+
           <section className="flex flex-col gap-3">
             <div className="flex flex-col gap-1">
               <h2 className="font-display text-lg font-semibold text-ink">
@@ -361,15 +514,20 @@ const TeslaPage = () => {
                   : `${requests.length} open ${requests.length === 1 ? "request" : "requests"}.`}
               </p>
               {/*
-                Stating the limit plainly beats implying a smarter filter. In this
-                phase every open request is listed, because the pooling rule compares
-                two requests and a driver's first request does not exist yet; the
-                corridor check starts narrowing this list once you accept one (D27).
+                Stating the rule plainly beats implying a smarter filter. With no
+                pool yet, every open request is listed because nothing anchors the
+                corridor check; once the first passenger is aboard, a request
+                shows only if it can share them and fit the seats left (D27).
               */}
-              {requests.length > 0 && isOnline ? (
+              {requests.length > 0 && pool !== null ? (
                 <p className="text-xs text-ink/55">
-                  Narrowing by shared pickup zone and corridor starts when you
-                  accept a request in the next phase.
+                  A request shows here only if it can share everyone already
+                  aboard and still fit your {formatSeats(pool.openSeats)} free.
+                </p>
+              ) : requests.length > 0 ? (
+                <p className="text-xs text-ink/55">
+                  Your first acceptance anchors the pool. After that, the list
+                  narrows to rides that share its pickup zone and corridor.
                 </p>
               ) : null}
             </div>
@@ -418,10 +576,30 @@ const TeslaPage = () => {
                             {request.destinationZoneCode} &middot; requested{" "}
                             {formatTimestamp(request.createdAt)}
                           </p>
+                          <FormError>
+                            {acceptErrors[request.id] || undefined}
+                          </FormError>
                         </div>
-                        <span className="font-display text-base font-semibold tabular-nums text-ink">
-                          {formatPoysha(request.fareEstimatePoysha)}
-                        </span>
+                        <div className="flex flex-col items-end gap-2">
+                          <span className="font-display text-base font-semibold tabular-nums text-ink">
+                            {formatPoysha(request.fareEstimatePoysha)}
+                          </span>
+                          {/*
+                            Disabled while offline for the reason the toggle's own
+                            copy states: going online "starts receiving requests".
+                            Accepting is the act of receiving one, and the server
+                            keeps the authority to refuse anything the feed misled
+                            the driver into clicking.
+                          */}
+                          <button
+                            type="button"
+                            disabled={!isOnline || acceptingId === request.id}
+                            onClick={() => void handleAccept(request.id)}
+                            className="inline-flex min-h-[44px] items-center justify-center rounded-2xl bg-mint px-5 font-display text-sm font-semibold text-ink shadow-[0_8px_18px_color-mix(in_oklab,var(--color-mint)_24%,transparent)] transition hover:translate-y-[-2px] active:translate-y-0 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-55"
+                          >
+                            {acceptingId === request.id ? "Accepting..." : "Accept"}
+                          </button>
+                        </div>
                       </div>
                     </Panel>
                   </li>

@@ -25,13 +25,39 @@ const stageIndexFor = (status: RideStatus): number => {
 };
 
 /**
+ * The one line that names where the trip stands without a named driver.
+ *
+ * `Ride` still carries no driver until a full assignment exists, so the avatar
+ * and ETA stay "—". But Phase 4 gives the ride states the line used to lie about:
+ * "No driver assigned yet" is false once a Tesla has been matched or a seat
+ * taken, and the centre of the panel is the cheapest place to say so.
+ */
+const assignmentLabelFor = (status: RideStatus): string => {
+  switch (status) {
+    case "MATCHED":
+      return "A Tesla has room for this ride";
+    case "ACCEPTED":
+      return "You have a seat aboard a Tesla";
+    case "DRIVER_ARRIVED":
+      return "A driver is at the door";
+    case "STARTED":
+      return "Your trip is under way";
+    case "COMPLETED":
+      return "Trip complete";
+    default:
+      return "No driver assigned yet";
+  }
+};
+
+/**
  * Where the passenger's current trip has got to.
  *
- * Until Phase 4 assigns a driver, a real ride only ever reaches `REQUESTED`, so
- * only the first stage completes and the rest stay pending. The design filled this
- * panel with a named driver, a plate, a star rating and a 4-minute ETA; none of
- * that has a data source, because `Ride` carries no driver until an assignment
- * exists. Showing "—" is the honest answer, and inventing a driver on a signed-in
+ * A ride reaches `REQUESTED` when made, `MATCHED` once an online Tesla has room
+ * for it, and `ACCEPTED` when a driver begins carrying it — so the track can
+ * complete two stages in Phase 4. The design filled this panel with a named
+ * driver, a plate, a star rating and a 4-minute ETA; none of that has a data
+ * source, because `Ride` carries no driver until a full assignment exists.
+ * Showing "—" is the honest answer, and inventing a driver on a signed-in
  * screen would be worse than an empty field.
  */
 export const RideStatusPanel = ({ ride }: { ride: Ride | undefined }) => {
@@ -96,7 +122,9 @@ export const RideStatusPanel = ({ ride }: { ride: Ride | undefined }) => {
           <span className="absolute right-px bottom-px size-[10px] rounded-full border-[3px] border-white bg-mint" />
         </div>
         <div>
-          <p className="text-sm font-semibold text-ink">No driver assigned yet</p>
+          <p className="text-sm font-semibold text-ink">
+            {assignmentLabelFor(ride.status)}
+          </p>
           <p className="text-[11px] text-forest/50">
             {ride.pickupZone.name} &rarr; {ride.destinationZone.name}
           </p>

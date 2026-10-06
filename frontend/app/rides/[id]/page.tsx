@@ -39,6 +39,8 @@ const RideDetailPage = () => {
   const [ride, setRide] = useState<Ride | null>(null);
   const [error, setError] = useState<string | undefined>(undefined);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const [joinError, setJoinError] = useState<string | undefined>(undefined);
 
   /**
    * Which ride id the current `ride` state belongs to.
@@ -102,6 +104,33 @@ const RideDetailPage = () => {
       );
     } finally {
       setIsCancelling(false);
+    }
+  };
+
+  /**
+   * Joins this ride to an open Tesla's pool along the same route (PRD A2, D7).
+   *
+   * Whether the ride *can* join is decided on the server each click, because the
+   * pool's seat count moves underneath the page. The button is only the offer —
+   * and "no open pool yet", "these routes cannot share", and the E1 last-seat
+   * refusal are all expected outcomes shown as the server's own words.
+   */
+  const isJoinable = ride?.status === "REQUESTED" || ride?.status === "MATCHED";
+
+  const handleJoin = async (): Promise<void> => {
+    setIsJoining(true);
+    setJoinError(undefined);
+    try {
+      const response = await apiClient.post<Ride>(`/rides/${rideId}/join`);
+      setRide(response.data);
+    } catch (caught) {
+      if (isUnauthorized(caught)) {
+        router.replace("/login");
+        return;
+      }
+      setJoinError(getErrorMessage(caught, "Could not join that ride."));
+    } finally {
+      setIsJoining(false);
     }
   };
 
@@ -213,6 +242,53 @@ const RideDetailPage = () => {
               </p>
             </div>
           </Panel>
+
+          {isJoinable ? (
+            <Panel as="section" className="animate-rise [animation-delay:80ms]">
+              <div className="flex flex-col gap-3 px-7 py-6">
+                <div className="flex flex-col gap-1">
+                  <h2 className="font-display text-base font-semibold text-ink">
+                    Get aboard
+                  </h2>
+                  <p className="text-sm text-ink/60">
+                    If a Tesla is already carrying riders on your route, joining
+                    takes the next free seat. Otherwise a driver accepts your
+                    request from their feed.
+                  </p>
+                </div>
+                {/*
+                  A join is self-service (D7), so its refusals are ordinary
+                  outcomes and are shown here, on the action they concern, rather
+                  than inheriting the page's shared error line.
+                */}
+                <FormError>{joinError}</FormError>
+                <button
+                  type="button"
+                  disabled={isJoining}
+                  onClick={() => void handleJoin()}
+                  className="inline-flex min-h-[50px] w-full items-center justify-center rounded-2xl bg-mint px-6 font-display text-sm font-semibold text-ink shadow-[0_10px_24px_color-mix(in_oklab,var(--color-mint)_28%,transparent)] transition hover:translate-y-[-2px] hover:shadow-[0_14px_30px_color-mix(in_oklab,var(--color-mint)_36%,transparent)] active:translate-y-0 active:scale-[.98] disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  {isJoining ? "Joining..." : "Join an open Tesla"}
+                </button>
+                <p className="text-xs text-ink/55">
+                  Once a Tesla carries you, your ride becomes Accepted and the
+                  seat is yours until you cancel it.
+                </p>
+              </div>
+            </Panel>
+          ) : ride.status === "ACCEPTED" ? (
+            <Panel as="section" className="animate-rise [animation-delay:80ms]">
+              <div className="flex flex-col gap-1 px-7 py-6">
+                <h2 className="font-display text-base font-semibold text-ink">
+                  Seat reserved
+                </h2>
+                <p className="text-sm text-ink/60">
+                  A Tesla now carries you. Watch this ride&rsquo;s history for what
+                  happens next.
+                </p>
+              </div>
+            </Panel>
+          ) : null}
 
           <Panel as="section" className="animate-rise [animation-delay:120ms]">
             <div className="flex flex-col gap-3 px-7 py-6">

@@ -152,7 +152,55 @@ export type MatchableRide = {
   seatsRequested: number;
   fareEstimatePoysha: number;
   status: RideStatus;
-  /** Always true in Phase 3; Phase 4 narrows the list using it (D27). */
+  /** Always true: what survives the feed's filters is by construction carryable (D27). */
   matchable: boolean;
   createdAt: string;
+};
+
+/**
+ * One passenger holding a seat in a Tesla's pool (PRD D4).
+ *
+ * Deliberately no fare: the manifest shows names, seats, and the pool total — a
+ * figure one passenger paid is not the driver's to compare against another's (PRD
+ * §6.5).
+ */
+export type PoolMember = {
+  membershipId: string;
+  rideId: string;
+  passengerName: string;
+  seats: number;
+  pickupZoneName: string;
+  destinationZoneName: string;
+  joinedAt: string;
+};
+
+/**
+ * The driver's view of who is aboard (PRD D4, D5).
+ *
+ * `openSeats` is computed on the server, so no screen does the arithmetic and a
+ * 3-seat Tesla with two aboard can never be rendered as "one free" by a client
+ * that forgot to subtract.
+ */
+export type PoolManifest = {
+  poolId: string;
+  plate: string;
+  model: string;
+  status: string;
+  seatCapacity: number;
+  occupiedSeats: number;
+  openSeats: number;
+  members: PoolMember[];
+  /** Sum of every member's frozen fare — the pool total the driver sees (PRD D4). */
+  poolTotalPoysha: number;
+};
+
+/**
+ * `GET /tesla/pool`, the envelope for "no open pool yet".
+ *
+ * The same shape as `MyTeslaView`: "no passengers aboard" is the ordinary opening
+ * state of a driver who just registered, so it travels as `pool: null` inside a
+ * 200 rather than as a 404 that would read like a fault (D28).
+ */
+export type MyPool = {
+  pool: PoolManifest | null;
 };
