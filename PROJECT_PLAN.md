@@ -14,7 +14,7 @@ Every phase ships something you can click through in a browser. No feature work 
 | 1 | Identity & the cast | `feature/auth-registration`, `feature/zones-reference` | Sign up/in as passenger or driver → role-aware home screen; zone list served | build, lint, click-through |
 | 2 | Request & fare | `feature/ride-request`, `feature/fare-engine` | Passenger requests a ride and sees an exact fare before confirming; history and cancel | build, lint, click-through |
 | 3 | Tesla & matchable feed | `feature/tesla-registration`, `feature/matching-engine` | Driver registers Bullet (3 seats), goes online, sees only matching requests | build, lint, click-through |
-| 4 | **Pooling & capacity** ⚠️ | `feature/pool-assignment`, `feature/capacity-locking` | Accept → pool opens → second rider joins → last seat claimed | build, lint, click-through |
+| 4 | **Pooling & capacity** ⚠️ | `feature/pool-assignment`, `feature/capacity-locking` | Accept → pool opens → second rider joins → last seat claimed | build, lint, click-through, e2e |
 | 5 | Lifecycle, audit & final fare | `feature/ride-lifecycle`, `feature/fare-finalisation`, `feature/history-audit` | Arrive → Start → Complete; final fares with sharing discount; timeline reconstructs everything | build, lint, click-through |
 | 6 | Money & trust | `feature/payment-teslapay`, `feature/rating` | Cash or TeslaPay settlement with top-up; driver rating | build, lint, click-through |
 | 7 | Hardening & isolation | `feature/access-control-audit`, `feature/logging-security` | Cross-account attempts refused everywhere; error envelope; request-id logging | build, lint, click-through |
@@ -90,7 +90,7 @@ mistaken for phase scope that has not happened yet.
 ## Working rules (every phase)
 
 1. **Merge gate** — a branch merges into `master` when build and lint are green and the slice has been clicked through end to end. Commits are conventional (`feat(scope): …`, `fix(…)`, `docs(…)`, `chore(…)`, `test(…)`, `refactor(…)`, `build(…)`). No "update"/"fix"/"final" commits, no filler commits.
-2. **Tests are a phase, not a per-phase tax** — Phases 1–8 write no test files; Phase 9 covers the six required behaviours. Known consequence: a regression introduced in Phase 4 surfaces in Phase 9, when fixing it costs more. Mitigated by the build + lint gate and by Phase 7 staying a real phase, since ownership isolation has no test behind it in this plan and must therefore be written carefully rather than retrofitted. **One exception was approved in Phase 3:** `backend/src/tesla/matching.spec.ts`, kept because PRD §5.4 traces user story D3 to a matching unit and because the Phase 3 feed is unfiltered, so a wrong matching predicate is invisible to the browser pass until Phase 4. It is the only test file in Phases 1–8. See `AI_USAGE.md`.
+2. **Tests are a phase, not a per-phase tax** — Phases 1–8 write no test files; Phase 9 covers the six required behaviours. Known consequence: a regression introduced in Phase 4 surfaces in Phase 9, when fixing it costs more. Mitigated by the build + lint gate and by Phase 7 staying a real phase, since ownership isolation has no test behind it in this plan and must therefore be written carefully rather than retrofitted. **One exception was approved in Phase 3:** `backend/src/tesla/matching.spec.ts`, kept because PRD §5.4 traces user story D3 to a matching unit and because the Phase 3 feed is unfiltered, so a wrong matching predicate is invisible to the browser pass until Phase 4. **A second exception was approved in Phase 4:** the pooling slice ships a committed e2e suite (`test/helpers.ts`, `test/pooling.e2e-spec.ts`, `test/seat-claim-race.e2e-spec.ts`, run via `npm run test:e2e`), because FR-C1/NFR-2 — capacity under concurrency — is the one requirement a browser pass cannot vote on, and a claim race is a defect that only exists between two threads. Both exceptions have the same shape: they witness a rule that cannot be *clicked*, and they run alongside `matching.spec.ts` without replacing Phase 9, which still owns the six formal behaviours. See `AI_USAGE.md`.
 3. **Demo checkpoint** at the end of every phase; those recordings feed the six-minute video (brief §13).
 4. **Long-lived branches** — `master` → `pre-release` → `release/v1.0.0`. Feature work never lands on `master` directly (brief §10, §16).
 5. **Docker truth** — develop against a local PostgreSQL; compose is authored in Phase 0 and verified in Phase 8. Docker is not installed on the development machine, so `docker compose up` verification is a documented limitation per brief §12 until Docker is available.
@@ -105,6 +105,13 @@ Phase 0's gate reads "migrations apply to an empty DB". Phase 0 ships the migrat
 ## Critical path: Phase 4
 
 Phase 4 carries the only genuinely hard requirement — seat capacity under concurrency (FR-C1, NFR-2) — plus the largest number of assumptions, and it is the climax of the demo. Its two schema decisions (one active pool per Tesla, fixed lock order — `docs/decisions.md` D12/D13) are written down before the code, because they change the schema. It gets the most careful review and the most explicit trade-off documentation.
+
+Its gate reads "build, lint, click-through, e2e": the pooling journey suite and the
+claim-race witness shipped with the phase (commit `test(api): the pooling journey
+and its race, as committed e2e specs`), so the hardest requirement is re-proven every
+time the build runs, not only at Phase 9. This is the second approved exception to
+the no-test-files rule — same shape as Phase 3's `matching.spec.ts`: a rule the
+browser pass cannot confirm by clicking — here, one seat at a time under concurrency.
 
 ## Acceptance
 
