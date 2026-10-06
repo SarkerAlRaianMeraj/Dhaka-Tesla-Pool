@@ -82,4 +82,19 @@ export class RideController {
   ): Promise<RideView> {
     return this.rideService.cancel(rideId, passenger.id);
   }
+
+  /**
+   * Joins the caller's ride to an open pool on the same route (PRD A2, D7).
+   *
+   * 201, because a pool membership now exists. The ride comes back with the full
+   * history, so the passenger's screen can move straight to "seat reserved".
+   */
+  @Post(':id/join')
+  @HttpCode(HttpStatus.CREATED)
+  join(
+    @Param('id', new ParseUUIDPipe()) rideId: string,
+    @CurrentUser() passenger: AuthenticatedUser,
+  ): Promise<RideView> {
+    return this.rideService.joinPool(rideId, passenger.id);
+  }
 }

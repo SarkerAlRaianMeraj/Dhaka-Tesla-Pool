@@ -8,6 +8,8 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { QueryFailedError, Repository } from 'typeorm';
 import { Ride } from '../ride/ride.entity';
 import { RideStatus } from '../common/enums/ride-status.enum';
+import { PoolService } from '../pool/pool.service';
+import { MyPoolView, PoolManifestView } from '../pool/pool.types';
 import { ZoneService } from '../zone/zone.service';
 import { RegisterTeslaDto } from './dto/register-tesla.dto';
 import { TeslaAvailability } from './tesla-availability.enum';
@@ -28,13 +30,12 @@ import { MatchableRideView, TeslaView } from './tesla.types';
  * This service still translates those violations into 409s with readable messages,
  * because "unique constraint failed" is not something a driver can act on.
  *
- * ## What is deliberately not here yet
+ * ## What lives in `PoolService`
  *
- * Error E2 — a driver going offline while owing a ride — needs an assignment to
- * exist, and rides do not carry a driver until Phase 4 introduces accepting and
- * pooling. So `setAvailability` currently only records the choice; the guard that
- * refuses to strand a passenger arrives with the state it protects. Phase 3 makes
- * no claim about that error case, and E2 stays on the Phase 4 list.
+ * Whether a seat may be claimed, and whether a driver may stop taking work while
+ * holding one, are decisions about the pool and the assignment. This service
+ * resolves the driver's Tesla and defers those decisions to `PoolService`, which
+ * is the single path that reads or writes occupancy (D13).
  */
 @Injectable()
 export class TeslaService {
@@ -53,6 +54,7 @@ export class TeslaService {
     @InjectRepository(Ride)
     private readonly rideRepository: Repository<Ride>,
     private readonly zoneService: ZoneService,
+    private readonly poolService: PoolService,
   ) {}
 
   /**
@@ -107,6 +109,12 @@ export class TeslaService {
    * without a vehicle can do, and silently accepting it would let the UI show a
    * green online state backed by nothing.
    *
+   * Refuses going OFFLINE while the driver owes an assigned passenger (PRD §5.6,
+   * E2). The assignment outweighs the toggle: a driver who stops taking new work
+   * still owes the ride they have, and going offline could only mean the
+   * passenger is silently stranded. Once the pool is empty the toggle is free
+   * again — that is exactly what `hasAssignedPassengers` measures.
+   *
    * A registration cannot be replaced or edited: capacity is fixed at creation
    * (US-D2) and the plate identifies the vehicle, so there is no update endpoint
    * and therefore no way to change what Phase 4 reasons about.
@@ -116,8 +124,41 @@ export class TeslaService {
     availability: TeslaAvailability,
   ): Promise<TeslaView> {
     const tesla = await this.requireByDriver(driverId);
+
+    if (
+      availability === TeslaAvailability.OFFLINE &&
+      (await this.poolService.hasAssignedPassengers(tesla.id))
+    ) {
+      throw new ConflictException(PoolService.CANNOT_GO_OFFLINE);
+    }
+
     tesla.availability = availability;
     return TeslaService.toView(await this.teslaRepository.save(tesla));
+  }
+
+  /**
+   * Accepts a request onto the driver's Tesla, opening or joining its pool
+   * (FR-D4, US-D4, PRD §5.3 `E -> G`).
+   *
+   * Returns the manifest rather than the ride, because what a driver needs the
+   * moment they accept is "who is aboard now" — and the request that just got
+   * accepted is the top line of it.
+   */
+  async accept(rideId: string, driverId: string): Promise<PoolManifestView> {
+    const tesla = await this.requireByDriver(driverId);
+    return this.poolService.acceptForDriver(tesla, rideId);
+  }
+
+  /**
+   * The driver's manifest, or an explicit empty one (PRD D4, D28).
+   *
+   * Requires a Tesla for the same reason the feed does: without a vehicle there
+   * is nothing to have passengers in, and "no Tesla" is a different answer from
+   * "no passengers yet".
+   */
+  async getPool(driverId: string): Promise<MyPoolView> {
+    const tesla = await this.requireByDriver(driverId);
+    return this.poolService.getManifest(tesla.id);
   }
 
   /**

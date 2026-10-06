@@ -35,6 +35,27 @@ export const isCancellableRideStatus = (status: RideStatus): boolean =>
   CANCELLABLE_RIDE_STATUSES.includes(status);
 
 /**
+ * The states a seat may be claimed from: a ride nobody has been assigned yet
+ * (PRD §5.2 and §5.3).
+ *
+ * `MATCHED` means a Tesla was identified; `REQUESTED` means it has not, and a
+ * driver may still accept such a ride because doing so is what creates the pool
+ * (PRD §5.3 `D -> E -> G`). Both therefore admit a claim, and everything after
+ * `ACCEPTED` does not — a second driver cannot claim a seat that is already held.
+ *
+ * Deliberately the complement of neither `CANCELLABLE` nor anything else: these
+ * are three separate questions about a lifecycle, and collapsing them into one
+ * shared list would make adding a state a change with four meanings.
+ */
+export const CLAIMABLE_RIDE_STATUSES: readonly RideStatus[] = [
+  RideStatus.REQUESTED,
+  RideStatus.MATCHED,
+];
+
+export const isClaimableRideStatus = (status: RideStatus): boolean =>
+  CLAIMABLE_RIDE_STATUSES.includes(status);
+
+/**
  * Plain-language labels for the passenger, per the messaging rules in PRD §5.6.
  *
  * A bare `DRIVER_ARRIVED` tells a passenger nothing about what to do next, which is

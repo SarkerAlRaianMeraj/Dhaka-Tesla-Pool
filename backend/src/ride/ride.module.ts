@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthCoreModule } from '../common/auth/auth-core.module';
+import { PoolModule } from '../pool/pool.module';
 import { ZoneModule } from '../zone/zone.module';
 import { Ride } from './ride.entity';
 import { RideStatusHistory } from './ride-status-history.entity';
@@ -17,6 +18,9 @@ import { RideService } from './ride.service';
     // Imported for `ZoneService.requireByCodes`, which is how a client-supplied
     // zone code becomes a zone row (D22).
     ZoneModule,
+    // Imported for `PoolService` — joining and cancelling a pooled ride both
+    // need the claimed seat to move through the one path that owns it (D13).
+    PoolModule,
   ],
   controllers: [RideController],
   providers: [RideService],

@@ -4,6 +4,8 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Param,
+  ParseUUIDPipe,
   Post,
   UseGuards,
 } from '@nestjs/common';
@@ -13,6 +15,7 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { Role } from '../common/enums/role.enum';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
+import { MyPoolView, PoolManifestView } from '../pool/pool.types';
 import { RegisterTeslaDto } from './dto/register-tesla.dto';
 import { UpdateTeslaAvailabilityDto } from './dto/update-tesla-availability.dto';
 import { TeslaService } from './tesla.service';
@@ -104,5 +107,32 @@ export class TeslaController {
     @CurrentUser() driver: AuthenticatedUser,
   ): Promise<MatchableRideView[]> {
     return this.teslaService.listMatchableRides(driver.id);
+  }
+
+  /**
+   * Accepts a request onto the driver's Tesla (FR-D4, US-D4, PRD §5.3).
+   *
+   * 201, because a pool membership now exists. The body is the manifest so the
+   * driver sees who is aboard immediately; the passenger's own screen is updated
+   * by their next read, exactly as the feed's next read reflects the seat gone.
+   */
+  @Post('requests/:rideId/accept')
+  @HttpCode(HttpStatus.CREATED)
+  accept(
+    @Param('rideId', new ParseUUIDPipe()) rideId: string,
+    @CurrentUser() driver: AuthenticatedUser,
+  ): Promise<PoolManifestView> {
+    return this.teslaService.accept(rideId, driver.id);
+  }
+
+  /**
+   * The driver's manifest of who is aboard (PRD D4).
+   *
+   * Always 200: no open pool is the ordinary "no passengers yet" state, and it
+   * travels as `pool: null` rather than a 404 (D28).
+   */
+  @Get('pool')
+  pool(@CurrentUser() driver: AuthenticatedUser): Promise<MyPoolView> {
+    return this.teslaService.getPool(driver.id);
   }
 }

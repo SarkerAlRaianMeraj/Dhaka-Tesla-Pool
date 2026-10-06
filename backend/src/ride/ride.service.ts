@@ -12,6 +12,7 @@ import {
   RideStatus,
 } from '../common/enums/ride-status.enum';
 import { ZoneService, ZoneView } from '../zone/zone.service';
+import { PoolService } from '../pool/pool.service';
 import { CreateRideRequestDto } from './dto/create-ride-request.dto';
 import { QuoteRideDto } from './dto/quote-ride.dto';
 import {
@@ -45,6 +46,9 @@ export class RideService {
     private readonly historyRepository: Repository<RideStatusHistory>,
     private readonly dataSource: DataSource,
     private readonly zoneService: ZoneService,
+    // Whether a seat can be claimed is `PoolService`'s call (D13); joining hands
+    // the ride over to the same single path that accepts for a driver.
+    private readonly poolService: PoolService,
   ) {}
 
   /**
@@ -151,6 +155,12 @@ export class RideService {
    * the driver has driven to collect them. Cancelling at that point would strand
    * both of them.
    *
+   * If the ride holds a seat in a pool, the seat returns to the pool and the pool
+   * total is recomputed (PRD §6.4). Both happen in the same transaction as the
+   * status write, with the pool lock taken before the ride's (D13) — so a
+   * cancellation and a concurrent claim of the seat it frees can never both think
+   * they worked.
+   *
    * The transition is a compare-and-set rather than a checked write. Two taps on
    * "cancel" can arrive at once, and reading the status first and then writing it
    * would let both observe `REQUESTED` and both commit, leaving two
@@ -170,6 +180,11 @@ export class RideService {
     const fromStatus = ride.status;
 
     await this.dataSource.transaction(async (manager) => {
+      // D13: the pool is locked before the ride is written. Discovering whether
+      // a seat exists is a read; only when one does is the pool locked, and the
+      // comparison against the ride must not run until the pool is held.
+      const membership = await this.poolService.lockRidePool(manager, ride.id);
+
       const { affected } = await manager
         .getRepository(Ride)
         .update(
@@ -190,6 +205,17 @@ export class RideService {
         );
       }
 
+      // The seat returns to the pool only now, when the cancellation is a fact
+      // this transaction has committed to — a status write that later failed must
+      // not have already given the seat away (PRD §6.4).
+      if (membership !== null) {
+        await this.poolService.releaseSeat(
+          manager,
+          membership,
+          ride.seatsRequested,
+        );
+      }
+
       await manager.getRepository(RideStatusHistory).save({
         ride: { id: ride.id } as Ride,
         fromStatus,
@@ -198,6 +224,21 @@ export class RideService {
     });
 
     return this.findOneOwned(ride.id, passengerId);
+  }
+
+  /**
+   * Joins the caller's ride to an open pool sharing their route (PRD A2, D7:
+   * passengers join without per-join driver approval).
+   *
+   * The server resolves the pool, because there is nothing in a request a
+   * passenger could use to name one — and an endpoint that accepted a pool id
+   * would let a passenger join a pool whose riders they do not fit. `PoolService`
+   * performs the same locked claim as a driver's accept, so a passenger and a
+   * driver racing for the same last seat go through the same decision.
+   */
+  async joinPool(rideId: string, passengerId: string): Promise<RideView> {
+    await this.poolService.joinForPassenger(rideId, passengerId);
+    return this.findOneOwned(rideId, passengerId);
   }
 
   /**
