@@ -12,6 +12,7 @@ import {
   RideStatus,
 } from '../common/enums/ride-status.enum';
 import { ZoneService, ZoneView } from '../zone/zone.service';
+import { MatchingService } from '../matching/matching.service';
 import { PoolService } from '../pool/pool.service';
 import { CreateRideRequestDto } from './dto/create-ride-request.dto';
 import { QuoteRideDto } from './dto/quote-ride.dto';
@@ -49,6 +50,9 @@ export class RideService {
     // Whether a seat can be claimed is `PoolService`'s call (D13); joining hands
     // the ride over to the same single path that accepts for a driver.
     private readonly poolService: PoolService,
+    // Whether a ride is `MATCHED` is recomputed after every write that can move
+    // a candidate Tesla in or out of serving it.
+    private readonly matchingService: MatchingService,
   ) {}
 
   /**
@@ -76,11 +80,17 @@ export class RideService {
   }
 
   /**
-   * Creates a request in `REQUESTED` and records that fact (FR-P2.4).
+   * Creates a request and records that fact (FR-P2.4, PRD §5.2 `D -> E -> F`).
    *
    * The ride and its first history row are written in one transaction. A ride with
    * no history row would render as a blank timeline and would look like a tracking
    * bug rather than a data problem, which is a much worse thing to debug later.
+   *
+   * The request starts in `REQUESTED` because that is the true answer to "has a
+   * suitable Tesla been identified?" at the moment of its own insertion. The
+   * matcher then runs (PRD's "< 60 s from request to MATCHED" is < 60 ms here),
+   * and if an online Tesla can already carry it the returned ride reads
+   * `MATCHED` — the two-step chain is written in the same request that caused it.
    */
   async createRequest(
     createRideRequestDto: CreateRideRequestDto,
@@ -112,6 +122,8 @@ export class RideService {
 
       return ride;
     });
+
+    await this.matchingService.reconcile();
 
     return this.findOneOwned(saved.id, passengerId);
   }
@@ -223,6 +235,10 @@ export class RideService {
       });
     });
 
+    // The freed seats may push an unassigned request back up to `MATCHED`
+    // (a candidate that was full now fits), so the payback is reconciled too.
+    await this.matchingService.reconcile();
+
     return this.findOneOwned(ride.id, passengerId);
   }
 
@@ -238,6 +254,9 @@ export class RideService {
    */
   async joinPool(rideId: string, passengerId: string): Promise<RideView> {
     await this.poolService.joinForPassenger(rideId, passengerId);
+    // A join occupies a seat, which may drop other unassigned rides below the
+    // fleet's remaining capacity; the matcher re-runs so `MATCHED` stays true.
+    await this.matchingService.reconcile();
     return this.findOneOwned(rideId, passengerId);
   }
 

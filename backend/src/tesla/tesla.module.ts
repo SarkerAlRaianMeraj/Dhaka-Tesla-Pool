@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthCoreModule } from '../common/auth/auth-core.module';
+import { MatchingModule } from '../matching/matching.module';
 import { PoolModule } from '../pool/pool.module';
 import { Ride } from '../ride/ride.entity';
 import { ZoneModule } from '../zone/zone.module';
@@ -28,6 +29,10 @@ import { TeslaService } from './tesla.service';
     ZoneModule,
     AuthCoreModule,
     PoolModule,
+    // Reconciles `REQUESTED`/`MATCHED` after availability flips and accepts;
+    // imported here rather than by `PoolModule` so the matcher stays out of the
+    // claim path's module graph (no cycle, and no shared writer for D13).
+    MatchingModule,
   ],
   controllers: [TeslaController],
   providers: [TeslaService],

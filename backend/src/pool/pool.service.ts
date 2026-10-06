@@ -502,6 +502,40 @@ export class PoolService {
 
   // ------------------------------------------------------------------ reads
 
+  /**
+   * What a feed must compare a request against: the seats this Tesla still has
+   * open and the routes its open pool is already anchored to.
+   *
+   * `null` when no pool is open — the driver has nothing aboard, so there is
+   * nothing to be compatible with and nothing to filter (D27). The consumer is
+   * `TeslaService.listMatchableRides`; the same anchor data, read per claim, is
+   * what `assertCompatible` reasons over.
+   */
+  async poolForFeed(
+    teslaId: string,
+  ): Promise<{ openSeats: number; anchors: MatchableRequest[] } | null> {
+    const pool = await this.poolRepository.findOne({
+      where: { tesla: { id: teslaId }, status: In(OPEN_POOL_STATUSES) },
+      relations: {
+        memberships: {
+          rideRequest: { pickupZone: true, destinationZone: true },
+        },
+      },
+    });
+
+    if (pool === null) {
+      return null;
+    }
+
+    return {
+      openSeats: Math.max(0, pool.seatCapacity - pool.occupiedSeats),
+      anchors: pool.memberships.map((membership) => ({
+        pickupZoneCode: membership.rideRequest.pickupZone.code,
+        destinationZoneCode: membership.rideRequest.destinationZone.code,
+      })),
+    };
+  }
+
   private async corridorIndex(): Promise<
     ReturnType<typeof buildCorridorIndex>
   > {

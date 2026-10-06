@@ -20,15 +20,26 @@
  * corridor overlap is computed as set intersection over the zones each corridor
  * contains.
  *
- * ## Why nothing calls this yet
+ * ## Why the rule has three callers
  *
- * The rule is pairwise — it answers "may these two requests share a Tesla", which
- * needs two requests. In Phase 3 a driver has no pool and therefore no first
- * request to compare against, so the feed lists `REQUESTED` rides and the
- * predicate has no caller (D27). It is written now, and verified now, precisely
- * because it is the rule most likely to be got subtly wrong; Phase 4 gives it an
- * anchor. `PRD` §5.4's traceability table lists a "matching unit" as part of D3's
- * evidence, which is why it carries a test now rather than in Phase 9.
+ * The rule is pairwise — it answers "may these two requests share a Tesla",
+ * which needs two requests. In Phase 3 a driver has no pool and therefore no
+ * first request to compare against, so the feed lists `REQUESTED` rides and the
+ * predicate has no caller (D27). Phase 4 gives it an anchor, and with one it is
+ * now used in three places:
+ *
+ * - **the driver feed** (`TeslaService.listMatchableRides`): once a first
+ *   request anchors the pool, every request it lists must share with every
+ *   member already aboard (PRD §5.3 D, US-D3);
+ * - **the matcher** (`MatchingService.reconcile`): a ride is `MATCHED` only
+ *   while at least one online Tesla could carry it, judged by the same pairwise
+ *   rule against that Tesla's pool;
+ * - **the claim** (`PoolService.claim`): the server still refuses, with the rule
+ *   stated back, a request a stale feed has already hidden (D13's single path).
+ *
+ * It is written and verified now rather than in Phase 9 because it is the rule
+ * most likely to be got subtly wrong; `PRD` §5.4's traceability table lists a
+ * "matching unit" as part of D3's evidence.
  */
 
 /** A request reduced to the only two facts the matching rule reads. */

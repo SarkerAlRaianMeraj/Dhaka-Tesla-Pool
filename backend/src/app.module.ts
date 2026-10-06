@@ -11,6 +11,7 @@ import { AppConfiguration, buildConfiguration } from './config/configuration';
 import { validateEnv } from './config/env.validation';
 import { HealthModule } from './health/health.module';
 import { AuthModule } from './auth/auth.module';
+import { MatchingModule } from './matching/matching.module';
 import { PoolModule } from './pool/pool.module';
 import { RideModule } from './ride/ride.module';
 import { TeslaModule } from './tesla/tesla.module';
@@ -52,6 +53,9 @@ export const configurationFactory = (): AppConfiguration =>
     // Phase 4: owns `pools` and `pool_memberships`, registered alongside the
     // modules that write to them so `autoLoadEntities` knows the schema exists.
     PoolModule,
+    // Phase 4: re-derives `REQUESTED`/`MATCHED` after every event that moves a
+    // candidate; imported by ride and tesla, registered here so Nest sees it.
+    MatchingModule,
   ],
 })
 export class AppModule implements NestModule {

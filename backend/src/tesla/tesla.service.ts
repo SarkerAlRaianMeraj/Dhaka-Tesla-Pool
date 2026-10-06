@@ -5,15 +5,17 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { QueryFailedError, Repository } from 'typeorm';
-import { Ride } from '../ride/ride.entity';
-import { RideStatus } from '../common/enums/ride-status.enum';
+import { In, QueryFailedError, Repository } from 'typeorm';
+import { CLAIMABLE_RIDE_STATUSES } from '../common/enums/ride-status.enum';
+import { MatchingService } from '../matching/matching.service';
 import { PoolService } from '../pool/pool.service';
 import { MyPoolView, PoolManifestView } from '../pool/pool.types';
+import { Ride } from '../ride/ride.entity';
 import { ZoneService } from '../zone/zone.service';
 import { RegisterTeslaDto } from './dto/register-tesla.dto';
 import { TeslaAvailability } from './tesla-availability.enum';
 import { Tesla } from './tesla.entity';
+import { buildCorridorIndex, canShare, MatchableRequest } from './matching';
 import { MatchableRideView, TeslaView } from './tesla.types';
 
 /**
@@ -55,6 +57,7 @@ export class TeslaService {
     private readonly rideRepository: Repository<Ride>,
     private readonly zoneService: ZoneService,
     private readonly poolService: PoolService,
+    private readonly matchingService: MatchingService,
   ) {}
 
   /**
@@ -133,12 +136,26 @@ export class TeslaService {
     }
 
     tesla.availability = availability;
-    return TeslaService.toView(await this.teslaRepository.save(tesla));
+    const view = TeslaService.toView(await this.teslaRepository.save(tesla));
+
+    // The flip changed the candidate set: going online makes unassigned rides
+    // matchable again, going offline withdraws every `MATCHED` promise this
+    // Tesla was the last standing candidate for (D32). Reconcile after the flip
+    // is committed so the matcher reads the new availability.
+    await this.matchingService.reconcile();
+
+    return view;
   }
 
   /**
    * Accepts a request onto the driver's Tesla, opening or joining its pool
    * (FR-D4, US-D4, PRD §5.3 `E -> G`).
+   *
+   * The accepted seat changes what the rest of the fleet may still match (the
+   * pool is anchored and a seat is taken), so the matcher re-runs once the
+   * claim has committed. The manifest this returns is about the pool the driver
+   * just used and is unaffected by those demotions, which is why the recede
+   * rather than bake the sweep results into the response.
    *
    * Returns the manifest rather than the ride, because what a driver needs the
    * moment they accept is "who is aboard now" — and the request that just got
@@ -146,7 +163,9 @@ export class TeslaService {
    */
   async accept(rideId: string, driverId: string): Promise<PoolManifestView> {
     const tesla = await this.requireByDriver(driverId);
-    return this.poolService.acceptForDriver(tesla, rideId);
+    const manifest = await this.poolService.acceptForDriver(tesla, rideId);
+    await this.matchingService.reconcile();
+    return manifest;
   }
 
   /**
@@ -162,40 +181,67 @@ export class TeslaService {
   }
 
   /**
-   * Open requests a driver's Tesla could serve (FR-D3.3, FR-M2).
+   * Open requests a driver's Tesla could serve (FR-D3.3, FR-M2, US-D3).
    *
-   * The list is every `REQUESTED` ride, newest first. In Phase 3 it is not
-   * narrowed pairwise, because the rule in `matching.ts` compares two requests
-   * and this driver has no pool yet, so there is nothing to compare against (D27).
-   * Phase 4 filters this same list once a first request anchors the driver's pool.
+   * Two filters, both introduced in Phase 4 and both from the matching rule:
    *
-   * Requiring a Tesla keeps the endpoint honest: without a vehicle there is
-   * nothing for these requests to match to, and an empty feed would read as "no
-   * demand" rather than "you have not registered".
+   * 1. **Status.** Only rides nobody is assigned to yet appear. This is
+   *    `REQUESTED` plus `MATCHED` — a request a suitable Tesla has been
+   *    identified for still needs a driver to accept it, so it belongs in feeds.
+   * 2. **Relevance to *this* Tesla.** Once the driver's pool is anchored by its
+   *    first passenger, a request is only shown if it can share with every
+   *    member already aboard (`canShare` against the whole pool, PRD §6.1) and
+   *    still fits the seats left open. With no pool there is nothing aboard and
+   *    nothing to filter (D27).
+   *
+   * `matchable` below is therefore always true — a request that survives these
+   * two filters is by construction one this driver can carry — and the field is
+   * kept so the client does not have to re-derive the decision.
    */
   async listMatchableRides(driverId: string): Promise<MatchableRideView[]> {
-    await this.requireByDriver(driverId);
+    const tesla = await this.requireByDriver(driverId);
+
+    const index = buildCorridorIndex(await this.zoneService.list());
+    const pool = await this.poolService.poolForFeed(tesla.id);
 
     const rides = await this.rideRepository.find({
-      where: { status: RideStatus.REQUESTED },
+      where: { status: In(CLAIMABLE_RIDE_STATUSES) },
       relations: { pickupZone: true, destinationZone: true },
       order: { createdAt: 'DESC' },
     });
 
-    return rides.map((ride) => ({
-      id: ride.id,
-      pickupZoneCode: ride.pickupZone.code,
-      pickupZoneName: ride.pickupZone.name,
-      destinationZoneCode: ride.destinationZone.code,
-      destinationZoneName: ride.destinationZone.name,
-      seatsRequested: ride.seatsRequested,
-      fareEstimatePoysha: ride.fareEstimatePoysha,
-      status: ride.status,
-      // Always true here, and stated explicitly so Phase 4's filtering reads as a
-      // narrowing of this list rather than as a different endpoint.
-      matchable: true,
-      createdAt: ride.createdAt,
-    }));
+    return rides
+      .filter((ride) => {
+        if (pool === null) {
+          return true;
+        }
+
+        const request: MatchableRequest = {
+          pickupZoneCode: ride.pickupZone.code,
+          destinationZoneCode: ride.destinationZone.code,
+        };
+
+        return (
+          pool.openSeats >= ride.seatsRequested &&
+          pool.anchors.every((anchor) => canShare(anchor, request, index))
+        );
+      })
+      .map((ride) => ({
+        id: ride.id,
+        pickupZoneCode: ride.pickupZone.code,
+        pickupZoneName: ride.pickupZone.name,
+        destinationZoneCode: ride.destinationZone.code,
+        destinationZoneName: ride.destinationZone.name,
+        seatsRequested: ride.seatsRequested,
+        fareEstimatePoysha: ride.fareEstimatePoysha,
+        status: ride.status,
+        // True for everything listed: the filter above kept only requests this
+        // Tesla's pool (or planned pool) can carry. It is stated explicitly so
+        // the fade between "Phase 3: nothing excluded" and "Phase 4: excluded
+        // everything incompatible" is a change of behaviour, not of shape.
+        matchable: true,
+        createdAt: ride.createdAt,
+      }));
   }
 
   private async requireByDriver(driverId: string): Promise<Tesla> {
