@@ -10,6 +10,10 @@ import { Navbar } from "./navbar";
  *
  * Three routes render bare, and the reason differs per route:
  *
+ * - `/` is the cinematic 3D landing page: its own full-viewport dark stage,
+ *   perimeter frame and nav. The global navbar would sit above a hero that already
+ *   leads with its own navigation, and the light themed footer would break the
+ *   near-black canvas it ends on.
  * - `/dashboard` is a full-height shell with its own 88px navigation rail, so the top
  *   navbar and the footer would both sit outside a layout that already provides its
  *   own navigation - the rail would be a second, competing menu.
@@ -29,7 +33,7 @@ import { Navbar } from "./navbar";
  *
  * Named to match its siblings in this folder, which are lower-case.
  */
-const BARE_ROUTES = new Set(["/dashboard", "/login", "/register"]);
+const BARE_ROUTES = new Set(["/", "/dashboard", "/login", "/register"]);
 
 export const Chrome = ({ children }: { children: ReactNode }) => {
   const pathname = usePathname();
